@@ -19,6 +19,8 @@ from datetime import datetime
 from scipy.fft import fft, fftfreq, fftshift
 from scipy import signal
 from numpy.fft import fft, fftshift
+from calculate_linewidth import *
+from set_shim_voltage import *
 
 ##   Hide the SDK functions by left click next to the if statement
 import_mre_functions = 1
@@ -50,6 +52,13 @@ if import_mre_functions == 1:
         dwf.FDwfAnalogInTriggerConditionSet(hdwf, DwfTriggerSlopeRise)
         dwf.FDwfAnalogInTriggerPositionSet(hdwf, c_double(acqTime / 2 + Delay) ) # sets the trigger position
         y = 0
+        return y
+    
+    def set_shim(ChNum,offset):
+        dwf.FDwfAnalogOutNodeEnableSet(hdwf, c_int(ChNum), c_int(1))
+        dwf.FDwfAnalogOutNodeFunctionSet(hdwf, c_int(ChNum), funcDC) # Function 
+        dwf.FDwfAnalogOutOffsetSet(hdwf, c_int(ChNum), c_double(offset))
+        y=0
         return y
     
     def set_wavegen(ChNum,freq,amplitude,pulseL,pd,Nreps):
@@ -127,30 +136,34 @@ if import_mre_functions == 1:
 # CONTROLABLE PARAMETERS
 ###################################################################
 
+# Options
+useSecondAD2 = False        # Use 2nd AD2
+GR_On = True                # Gradient Control
+shim_On = True              # Shim control
 
-numAvgs = 10
+numAvgs = 1
 
 # RF pulse paramters
 frequency = 3312666
 amplitude = 5
 TE = .02
-Tp = .0005
+Tp = .00025
 
 Npulse = 2   
 TR1 = 0.25
 
 # Data acquisition parameters
 sampFreq = 1000000
-Tacq = .0064
+Tacq = .006
 
 # LO wave parameters
 IF_freq = 100000 # 100kHz
 amplitude_LO = 0.5
 
 # Gradient parameters
-Npts = 60
+Npts = 64
 FOV = 2    # cm
-ramp_time1 = 0.0005
+ramp_time = 0.0005
 calibration_factor = 1.375  # G/cm/V_ad2
 
 
@@ -166,7 +179,7 @@ predelay = TE / 2 - Tp
 
 # Data acquisition parameters
 numSamp = int(Tacq * sampFreq)
-Trig_AD2 = (TE + Tp/2 + predelay) - 0.5 * Tacq  #  trigger the AD2 digitizer at TE - Tacq/2
+Trig_AD2 = (TE/2 + Tp/2 + predelay) - 0.5 * Tacq  #  trigger the AD2 digitizer at TE - Tacq/2
 SeqTime = .04    # duration that will encompass a single pulse sequence
 DIO_rate = 10**5  # effective clock rate of the digital i/O
 totalCycles = SeqTime*DIO_rate
@@ -278,6 +291,7 @@ for i in range(numAvgs):
     #  Finished setting up multiple AD2s
     #############################################################
     
+    # Point to first AD2
     y1 = set_ad2_device(0)
     
     # Setup External Scope trigger
@@ -306,12 +320,11 @@ for i in range(numAvgs):
     max_voltage = 1.0
     
     # === TRAPEZOID SPECIFICATIONS ===
-    # Trapezoid 1 (starts at beginning)
-    #ramp_time1 = 0.001        
+    # Trapezoid 1 (starts at beginning)    
     hold_time1 = Tacq/2        # flat top time (s)
     
     # Trapezoid 2 (can be placed anywhere by midpoint)
-    ramp_time2 = ramp_time1
+    ramp_time2 = ramp_time
     hold_time2 = Tacq
     midpoint_time2 = TE - Tp/2
     
@@ -363,62 +376,60 @@ for i in range(numAvgs):
         rgdSamples2[i] = rgdSamples2_np[i]
     
     # === PLOT ===
-    # plt.figure(figsize=(10,4))
-    # plt.plot(time_array, rgdSamples2_np)
-    # plt.xlabel('Time [s]')
-    # plt.ylabel('Voltage')
-    # plt.grid(True)
-    # plt.show()
-    
-    #######################################################################
-    y1 = set_ad2_device(1)
-    #######################################################################
+    plt.figure(figsize=(10,4))
+    plt.plot(time_array, rgdSamples2_np)
+    plt.xlabel('Time [s]')
+    plt.ylabel('Voltage')
+    plt.grid(True)
+    plt.show()
     
     
-
-    print("Generating custom waveform...")
-    dwf.FDwfAnalogOutNodeEnableSet(hdwf, channel, AnalogOutNodeCarrier, c_int(1))
-    dwf.FDwfAnalogOutNodeFunctionSet(hdwf, channel, AnalogOutNodeCarrier, funcCustom) 
-    dwf.FDwfAnalogOutNodeDataSet(hdwf, channel, AnalogOutNodeCarrier, rgdSamples2, c_int(cSamples))
-    dwf.FDwfAnalogOutNodeFrequencySet(hdwf, channel, AnalogOutNodeCarrier, c_double(hzFreq2)) 
-    dwf.FDwfAnalogOutNodeAmplitudeSet(hdwf, channel, AnalogOutNodeCarrier, c_double(V_grad_ad2)) 
-
-    dwf.FDwfAnalogOutRunSet(hdwf, channel, c_double(1.0/hzFreq2)) # run for 2 periods
-    dwf.FDwfAnalogOutWaitSet(hdwf, channel, c_double(predelay + Tp)) # wait one pulse time
-    dwf.FDwfAnalogOutRepeatSet(hdwf, channel, c_int(1)) # repeat 3 times
-    dwf.FDwfAnalogOutTriggerSourceSet(hdwf, channel, trigsrcExternal1)  # sets the trigger source
+    if useSecondAD2:
     
-    
-
-    
-    ########################################################################
-    # Shim Control
-    ########################################################################
-    
-    
-    shim1_ChNum = 1
-    shim1_V = 0.
+        #######################################################################
+        # Point to seconds AD2
+        y1 = set_ad2_device(1)
+        #######################################################################
         
-        # Check voltage limits
-    if abs(shim1_V) > 0.1:
-        raise ValueError(f"Shim voltage limit exceeded! "
-                         f"shim1_V={shim1_V:.3f} V. "
-                         "Voltages must stay within ±0.1 V.")
-    else:
-        print(f"Shim voltages OK: shim1_V={shim1_V:.3f} V")
+        if GR_On:
     
-    
-    print("Generating shim voltage...")
-    dwf.FDwfAnalogOutNodeEnableSet(hdwf, c_int(shim1_ChNum), c_int(1)) 
-    dwf.FDwfAnalogOutNodeFunctionSet(hdwf, c_int(shim1_ChNum), funcDC) # Function 
-    dwf.FDwfAnalogOutOffsetSet(hdwf, c_int(shim1_ChNum), c_double(shim1_V))
-    
-    
-    y2 = set_pos_powersupply(5)
-    y2 = arm_analog()
-    #######################################################################
-    y1 = set_ad2_device(0)
-    #######################################################################
+            print("Generating custom waveform...")
+            dwf.FDwfAnalogOutNodeEnableSet(hdwf, channel, AnalogOutNodeCarrier, c_int(1))
+            dwf.FDwfAnalogOutNodeFunctionSet(hdwf, channel, AnalogOutNodeCarrier, funcCustom) 
+            dwf.FDwfAnalogOutNodeDataSet(hdwf, channel, AnalogOutNodeCarrier, rgdSamples2, c_int(cSamples))
+            dwf.FDwfAnalogOutNodeFrequencySet(hdwf, channel, AnalogOutNodeCarrier, c_double(hzFreq2)) 
+            dwf.FDwfAnalogOutNodeAmplitudeSet(hdwf, channel, AnalogOutNodeCarrier, c_double(V_grad_ad2)) 
+        
+            dwf.FDwfAnalogOutRunSet(hdwf, channel, c_double(1.0/hzFreq2)) # run for 2 periods
+            dwf.FDwfAnalogOutWaitSet(hdwf, channel, c_double(predelay + Tp)) # wait one pulse time
+            dwf.FDwfAnalogOutRepeatSet(hdwf, channel, c_int(1)) # repeat 3 times
+            dwf.FDwfAnalogOutTriggerSourceSet(hdwf, channel, trigsrcExternal1)  # sets the trigger source
+        
+        
+        ########################################################################
+        # Shim Control
+        ########################################################################
+        
+        if shim_On:
+                  
+            shim1_ChNum = 1
+            shim1_V = 0.1
+
+            check_shim_voltage(shim1_V)
+            
+            # Turn on first shim
+            print("GSetting shim voltage 1...")
+            set_shim(ChNum, offset)
+            
+            # Turn on second shim
+            print("GSetting shim voltage 1...")
+            set_shim(ChNum, offset)
+
+        #######################################################################
+        y2 = set_pos_powersupply(5)
+        y2 = arm_analog()
+        y1 = set_ad2_device(0)      # Point back at device 1
+        #######################################################################
     
     
     ########################################################################
@@ -467,10 +478,6 @@ for i in range(numAvgs):
     ## define time array for plot
     Tacqms = Tacq * 1000.
     time2 = np.linspace(0, Tacqms, numSamp) # linspace(start_time, total time, number of points)
-    
-    ## Butterworth bandpass filter
-    sos = signal.butter(butterworth_N, butterworth_Wn, 'bandpass', fs=sampFreq, output='sos')
-    filtered = signal.sosfilt(sos, rgdSamples)
         
     # ========== Plot acquired data ================
     plt.plot(time2, rgdSamples)
@@ -479,27 +486,42 @@ for i in range(numAvgs):
     plt.title('Signal')
     fig1 = plt.show()
     
-    # plt.plot(time2, filtered)
-    # plt.xlabel('Time msec')
-    # plt.ylabel('Measured Voltage (V)')
-    # plt.title('Filtered Signal')
-    # fig2 = plt.show()
     
+    # Sum the signal for averaging
     signals_total = [float(rgdSamples[j]) + signals_total[j] for j in range(len(signals_total))]
         
     y1 = reset_and_close()
     time.sleep(TR1)
     
+# Take average of signal
 signals_avg = [val / numAvgs for val in signals_total]
 
+########################################################################
+# Plot Averaged Signal
+########################################################################
 plt.plot(time2, signals_avg)
 plt.xlabel('Time (ms)')
 plt.ylabel('Measured Voltage')
 plt.title(f'Averaged Signal with {numAvgs} Averages')
-#plt.title(f'Summed Signal with {numAvgs} Sums')
 fig3 = plt.show()
+
+########################################################################
+# Plot Filtered Averaged Signal
+########################################################################
     
-# ========== Plot FFT ================
+## Butterworth bandpass filter
+sos = signal.butter(butterworth_N, butterworth_Wn, 'bandpass', fs=sampFreq, output='sos')
+filtered = signal.sosfilt(sos, rgdSamples)
+
+plt.plot(time2, filtered)
+plt.xlabel('Time msec')
+plt.ylabel('Measured Voltage (V)')
+plt.title('Filtered Averaged Signal with {numAvgs} Averages')
+fig2 = plt.show()
+
+########################################################################
+# Plot FFT of Averaged Signal
+########################################################################
 npts = numSamp
 deltat = 1e-6  # 1 microsecond = 1 MSps sampling rate
 
@@ -528,6 +550,31 @@ plt.ylabel('FFT Magnitude')
 plt.title(f'FFT around {center_freq/1e3:.0f} kHz (±{bandwidth/2/1e3:.0f} kHz) - RF Freq {frequency}')
 plt.grid(True)
 plt.show()
+
+########################################################################
+# Calculate Linewidth of FFT
+########################################################################
+
+spectrum = abs(y_transform[mask])
+spectrum_freq = freq[mask]
+
+linewidth, peak_freq = calculate_linewidth(spectrum_freq, spectrum)
+print(f"Peak at {peak_freq:.2f} Hz, Linewidth = {linewidth:.2f} Hz")
+
+plt.plot(spectrum_freq, spectrum)
+plt.axvline(peak_freq, color='r', linestyle='--', label='Peak')
+plt.axvline(peak_freq - linewidth/2, color='g', linestyle='--', label='FWHM')
+plt.axvline(peak_freq + linewidth/2, color='g', linestyle='--')
+plt.legend()
+plt.xlabel('Frequency (Hz)')
+plt.ylabel('FFT Magnitude')
+plt.title(f'FFT around {center_freq/1e3:.0f} kHz (±{bandwidth/2/1e3:.0f} kHz) - RF Freq {frequency}')
+plt.grid(True)
+plt.show()
+
+########################################################################
+# Save Averaged Signal to File
+########################################################################
        
 # Write data to file
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -542,4 +589,3 @@ np.savez(
     timestamp=timestamp
 )
 
-# time.sleep(2)
