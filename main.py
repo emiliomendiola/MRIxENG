@@ -21,6 +21,8 @@ from scipy import signal
 from numpy.fft import fft, fftshift
 from calculate_linewidth import *
 from set_shim_voltage import *
+from save_parameters_to_file import *
+from gradient_control import *
 
 ##   Hide the SDK functions by left click next to the if statement
 import_mre_functions = 1
@@ -141,20 +143,23 @@ useSecondAD2 = False        # Use 2nd AD2
 GR_On = True                # Gradient Control
 shim_On = True              # Shim control
 
-numAvgs = 1
+numAvgs = 4
 
 # RF pulse paramters
-frequency = 3312666
+frequency = 3312333
 amplitude = 5
 TE = .02
-Tp = .00025
+Tp = .0005
+
+# Print out important data
+print(f"RF pulse frequency is {frequency} MHz.")
 
 Npulse = 2   
 TR1 = 0.25
 
 # Data acquisition parameters
 sampFreq = 1000000
-Tacq = .006
+Tacq = .0064
 
 # LO wave parameters
 IF_freq = 100000 # 100kHz
@@ -165,10 +170,27 @@ Npts = 64
 FOV = 2    # cm
 ramp_time = 0.0005
 calibration_factor = 1.375  # G/cm/V_ad2
+dephase_gradient_factor = 2.
+
+# Shim parameters
+shim1_V = 0.1
+shim2_V = 0.1
 
 
-# Print out important data
-print(f"RF pulse frequency is {frequency} MHz.")
+############### Added in Lab 9 for angles ##########################
+num_projections = 8
+
+
+### Plots and saving options
+plot_individual_signals = False
+plot_gradients = True
+plot_averaged_signal = False
+plot_filtered_average_signal = True
+plot_fft = True
+plot_fft_linewidth = True
+save_data = False
+
+
 
 ###################################################################
 # COMPUTED PARAMETERS
@@ -179,7 +201,7 @@ predelay = TE / 2 - Tp
 
 # Data acquisition parameters
 numSamp = int(Tacq * sampFreq)
-Trig_AD2 = (TE/2 + Tp/2 + predelay) - 0.5 * Tacq  #  trigger the AD2 digitizer at TE - Tacq/2
+Trig_AD2 = (TE + Tp/2 + predelay) - 0.5 * Tacq  #  trigger the AD2 digitizer at TE - Tacq/2
 SeqTime = .04    # duration that will encompass a single pulse sequence
 DIO_rate = 10**5  # effective clock rate of the digital i/O
 totalCycles = SeqTime*DIO_rate
@@ -192,14 +214,27 @@ predelay_LO = Trig_AD2 - LO_buffer_time/2.
 Npulse_LO = 1
 
 # Gradient parameters
-ramp_time1 = 0.0005                  # ramp up/down time (s)
-total_time = TE + Tacq/2 + ramp_time1       # total waveform duration in seconds
+total_time = TE + Tacq/2 + ramp_time       # total waveform duration in seconds
 freq_resolution = 1/Tacq                        # Hz
 img_res = (FOV * 10.) / Npts                    # mm
 gradient_strength_Hzmm = freq_resolution / img_res      # Hz/mm
 gradient_strength_Gcm = gradient_strength_Hzmm / 425.7  # G/cm
 V_grad = gradient_strength_Gcm / calibration_factor 
 V_grad_ad2 = V_grad / 11                # correct for amp gain of 11
+
+# Gradient angle parameters
+#Creates an array of theta values for projection
+theta = np.linspace(0, 180, num_projections, endpoint=True)
+#Initializing arrays
+Gz = np.zeros(num_projections)
+Gx = np.zeros(num_projections)
+theta_index = 0
+#Creates arrays with gradient amplitudes for the x and z directions
+for proj_angle in theta:
+    Gz[theta_index] = V_grad_ad2 * np.cos(np.deg2rad(theta[theta_index]))
+    Gx[theta_index] = V_grad_ad2 * np.sin(np.deg2rad(theta[theta_index]))
+    theta_index += 1
+
 
 print(f'AD2 voltage is {V_grad_ad2}')
 print(f'Gradient voltage is {V_grad}')
@@ -227,365 +262,404 @@ butterworth_Wn = [f_low, f_high]
 
 signals_total = np.zeros(numSamp)
 
-for i in range(numAvgs):  
-    
-    
-    ###################################################################
-           # Opens the AD2s
-    ##################################################################
-    
-    ##   Hide the open_ad2 code by by left click next to the if statement
-    open_ad2 = 1
-    prt_info = 1
-    if open_ad2 == 1:
-        dwf = cdll.LoadLibrary('/Library/Frameworks/dwf.framework/dwf')
-        # check library loading errors, like: Adept Runtime not found
-        szerr = create_string_buffer(512)
-        dwf.FDwfGetLastErrorMsg(szerr)
-        # declare ctype variables
-        IsInUse = c_bool()
-        hdwf = c_int()
-        rghdwf = []
-        cchannel = c_int()
-        cdevices = c_int()
-        voltage = c_double();
-        sts = c_byte()
-        hzAcq = c_double(sampFreq)  # changes sample frequency into c_double
-        rgdSamples = (c_double * numSamp)()  # list for C1 on scope
-        # declare string variables
-        devicename = create_string_buffer(64)
-        serialnum = create_string_buffer(16)
-      
-        # enumerate connected devices
-        dwf.FDwfEnum(c_int(0), byref(cdevices))
-    #            print ("Number of Devices: "+str(cdevices.value))
+
+for Nproj in range(num_projections):
+ 
+    for i in range(numAvgs):  
         
-        # open and configure devices
-        for idevice in range(0, cdevices.value):
-            dwf.FDwfEnumDeviceName(c_int(idevice), devicename)
-            dwf.FDwfEnumSN(c_int(idevice), serialnum)
-            if (prt_info == 1):
-              print ("------------------------------")
-        #              print (' idevice = ',idevice)
-              print ("Device "+str(idevice+1)+" : ")
-              print ('Serial Number = ',serialnum.value)
-            dwf.FDwfDeviceOpen(c_int(idevice), byref(hdwf))
-            if hdwf.value == 0:
-                szerr = create_string_buffer(512)
-                dwf.FDwfGetLastErrorMsg(szerr)
-                print (szerr.value)
-                dwf.FDwfDeviceCloseAll()
-                sys.exit(0)
+        
+        ###################################################################
+               # Opens the AD2s
+        ##################################################################
+        
+        ##   Hide the open_ad2 code by by left click next to the if statement
+        open_ad2 = 1
+        prt_info = 1
+        if open_ad2 == 1:
+            dwf = cdll.LoadLibrary('/Library/Frameworks/dwf.framework/dwf')
+            # check library loading errors, like: Adept Runtime not found
+            szerr = create_string_buffer(512)
+            dwf.FDwfGetLastErrorMsg(szerr)
+            # declare ctype variables
+            IsInUse = c_bool()
+            hdwf = c_int()
+            rghdwf = []
+            cchannel = c_int()
+            cdevices = c_int()
+            voltage = c_double();
+            sts = c_byte()
+            hzAcq = c_double(sampFreq)  # changes sample frequency into c_double
+            rgdSamples = (c_double * numSamp)()  # list for C1 on scope
+            # declare string variables
+            devicename = create_string_buffer(64)
+            serialnum = create_string_buffer(16)
+          
+            # enumerate connected devices
+            dwf.FDwfEnum(c_int(0), byref(cdevices))
+        #            print ("Number of Devices: "+str(cdevices.value))
+            
+            # open and configure devices
+            for idevice in range(0, cdevices.value):
+                dwf.FDwfEnumDeviceName(c_int(idevice), devicename)
+                dwf.FDwfEnumSN(c_int(idevice), serialnum)
+                if (prt_info == 1):
+                  print ("------------------------------")
+            #              print (' idevice = ',idevice)
+                  print ("Device "+str(idevice+1)+" : ")
+                  print ('Serial Number = ',serialnum.value)
+                dwf.FDwfDeviceOpen(c_int(idevice), byref(hdwf))
+                if hdwf.value == 0:
+                    szerr = create_string_buffer(512)
+                    dwf.FDwfGetLastErrorMsg(szerr)
+                    print (szerr.value)
+                    dwf.FDwfDeviceCloseAll()
+                    sys.exit(0)
+                    
+                rghdwf.append(hdwf.value)           
+            # looks up buffer size
+                cBufMax = c_int()
+                dwf.FDwfAnalogInBufferSizeInfo(hdwf, 0, byref(cBufMax))
                 
-            rghdwf.append(hdwf.value)           
-        # looks up buffer size
-            cBufMax = c_int()
-            dwf.FDwfAnalogInBufferSizeInfo(hdwf, 0, byref(cBufMax))
+                dwf.FDwfEnumDeviceName(c_int(idevice), devicename)
+                dwf.FDwfEnumSN(c_int(idevice), serialnum)
+                hdwf.value = rghdwf[idevice]
+            # configure and start clock
+            hzSys = c_double()
+            dwf.FDwfDigitalOutInternalClockInfo(hdwf, byref(hzSys))
+        #  Finished setting up multiple AD2s
+        #############################################################
+        
+        # Point to first AD2
+        y1 = set_ad2_device(0)
+        
+        # Setup External Scope trigger
+        Trig_low = .0001
+        Trig_high = .001
+        y = set_dio(0,totalCycles,Trig_low,Trig_high)
+        
+        # Setup AD2 Scope trigger
+        Trig_low = Trig_AD2
+        Trig_high = Tacq
+        y = set_dio(4,totalCycles,Trig_low,Trig_high)
+        
+        
+        
+        ################################################################
+        # Gradient waveform generator
+        ################################################################
+        
+        # GRADIENT WAVEFORM 1
+        
+        # === PARAMETERS ===
+        cSamples = 8196
+        deltaT = total_time / cSamples
+        hzFreq2 = 1/total_time
+        
+        # Maximum voltage
+        max_voltage = 1.0
+        
+        # === TRAPEZOID SPECIFICATIONS ===
+        # Trapezoid 1 (starts at beginning) 
+        ramp_time1 = ramp_time
+        hold_time1 = Tacq/2        # flat top time (s)
+        
+        # Trapezoid 2 (can be placed anywhere by midpoint)
+        ramp_time2 = ramp_time
+        hold_time2 = Tacq
+        midpoint_time2 = TE - Tp/2
+        
+        # === CREATE TIME ARRAY ===
+        time_array = np.arange(0, total_time, deltaT)
+        
+        # Initialize waveform with zeros
+        rgdSamples2_np = np.zeros(cSamples)
+        rgdSamples3_np = np.zeros(cSamples)
+        
+        # === CREATE TRAPEZOIDS ===
+        trapezoid1 = create_trapezoid(ramp_time1, hold_time1, max_voltage, deltaT)
+        trapezoid2 = create_trapezoid(ramp_time2, hold_time2, max_voltage, deltaT)
+        
+        # Insert trapezoids
+        rgdSamples2_np = insert_trapezoid(rgdSamples2_np, trapezoid1, start_index=0)
+        rgdSamples3_np = insert_trapezoid(rgdSamples3_np, trapezoid1, start_index=0)
+        
+        # Compute start index for trapezoid2 based on midpoint
+        center_index2 = int(midpoint_time2 / deltaT)
+        start_index2 = center_index2 - len(trapezoid2)//2
+        rgdSamples2_np = insert_trapezoid(rgdSamples2_np, trapezoid2, start_index2)
+        rgdSamples3_np = insert_trapezoid(rgdSamples3_np, trapezoid2, start_index2)
+        
+        # === CONVERT TO CTYPE ARRAY FOR HARDWARE ===
+        rgdSamples2 = (c_double * cSamples)()
+        rgdSamples3 = (c_double * cSamples)()
+        for i in range(cSamples):
+            rgdSamples2[i] = rgdSamples2_np[i]
+            rgdSamples3[i] = rgdSamples3_np[i]
+        
+        
+        if plot_gradients:
+            # === PLOT ===
+            plt.figure(figsize=(10,4))
+            plt.plot(time_array, rgdSamples2_np*Gx[Nproj])
+            plt.plot(time_array, rgdSamples3_np*Gz[Nproj])
+            plt.xlabel('Time [s]')
+            plt.ylabel('Voltage')
+            plt.grid(True)
+            plt.show()
+        
+        
+        if useSecondAD2:
+        
+            #######################################################################
+            # Point to seconds AD2
+            y1 = set_ad2_device(1)
+            #######################################################################
             
-            dwf.FDwfEnumDeviceName(c_int(idevice), devicename)
-            dwf.FDwfEnumSN(c_int(idevice), serialnum)
-            hdwf.value = rghdwf[idevice]
-        # configure and start clock
-        hzSys = c_double()
-        dwf.FDwfDigitalOutInternalClockInfo(hdwf, byref(hzSys))
-    #  Finished setting up multiple AD2s
-    #############################################################
+            
+            ########################################################################
+            # Shim Control
+            ########################################################################
+            
+            if shim_On:
+                      
+                shim1_ChNum = 0
+                shim2_ChNum = 1
+                
     
-    # Point to first AD2
-    y1 = set_ad2_device(0)
-    
-    # Setup External Scope trigger
-    Trig_low = .0001
-    Trig_high = .001
-    y = set_dio(0,totalCycles,Trig_low,Trig_high)
-    
-    # Setup AD2 Scope trigger
-    Trig_low = Trig_AD2
-    Trig_high = Tacq
-    y = set_dio(4,totalCycles,Trig_low,Trig_high)
-    
-    
-    
-    ################################################################
-    # Gradient waveform generator
-    ################################################################
-    
-    # === PARAMETERS ===
-    cSamples = 8196
-    deltaT = total_time / cSamples
-    channel = c_int(0)
-    hzFreq2 = 1/total_time
-    
-    # Maximum voltage
-    max_voltage = 1.0
-    
-    # === TRAPEZOID SPECIFICATIONS ===
-    # Trapezoid 1 (starts at beginning)    
-    hold_time1 = Tacq/2        # flat top time (s)
-    
-    # Trapezoid 2 (can be placed anywhere by midpoint)
-    ramp_time2 = ramp_time
-    hold_time2 = Tacq
-    midpoint_time2 = TE - Tp/2
-    
-    # === CREATE TIME ARRAY ===
-    time_array = np.arange(0, total_time, deltaT)
-    
-    # Initialize waveform with zeros
-    rgdSamples2_np = np.zeros(cSamples)
-    
-    def create_trapezoid(ramp_time, hold_time, max_voltage, deltaT):
-        """Return one trapezoid waveform array."""
-        ramp_samples = int(ramp_time / deltaT)
-        hold_samples = int(hold_time / deltaT)
+                check_shim_voltage(shim1_V)
+                check_shim_voltage(shim2_V)
+                
+                # Turn on first shim
+                print("Setting shim 1 voltage 1...")
+                set_shim(shim1_ChNum, shim1_V)
+                
+                # Turn on second shim
+                print("Setting shim 2 voltage 2...")
+                set_shim(shim2_ChNum, shim2_V)
+            
+            ########################################################################
+            # Gradient Control
+            ######################################################################## 
+ 
+            if GR_On:
         
-        ramp_up = np.linspace(0, max_voltage, ramp_samples, endpoint=False)
-        hold = np.ones(hold_samples) * max_voltage
-        ramp_down = np.linspace(max_voltage, 0, ramp_samples, endpoint=False)
-        
-        return np.concatenate((ramp_up, hold, ramp_down))
+                # GRADIENT WAVEFORM 1 
+                channel0 = c_int(0)
+                print("Generating custom waveform...")
+                dwf.FDwfAnalogOutNodeEnableSet(hdwf, channel0, AnalogOutNodeCarrier, c_int(1))
+                dwf.FDwfAnalogOutNodeFunctionSet(hdwf, channel0, AnalogOutNodeCarrier, funcCustom) 
+                dwf.FDwfAnalogOutNodeDataSet(hdwf, channel0, AnalogOutNodeCarrier, rgdSamples2, c_int(cSamples))
+                dwf.FDwfAnalogOutNodeFrequencySet(hdwf, channel0, AnalogOutNodeCarrier, c_double(hzFreq2)) 
+                dwf.FDwfAnalogOutNodeAmplitudeSet(hdwf, channel0, AnalogOutNodeCarrier, c_double(Gx[Nproj])) 
+            
+                dwf.FDwfAnalogOutRunSet(hdwf, channel0, c_double(1.0/hzFreq2)) # run for 2 periods
+                dwf.FDwfAnalogOutWaitSet(hdwf, channel0, c_double(predelay + Tp)) # wait one pulse time
+                dwf.FDwfAnalogOutRepeatSet(hdwf, channel0, c_int(1)) # repeat 3 times
+                dwf.FDwfAnalogOutTriggerSourceSet(hdwf, channel0, trigsrcExternal1)  # sets the trigger source
+                
+                # GRADIENT WAVEFORM 2 
+                channel1 = c_int(1)
+                print("Generating custom waveform...")
+                dwf.FDwfAnalogOutNodeEnableSet(hdwf, channel1, AnalogOutNodeCarrier, c_int(1))
+                dwf.FDwfAnalogOutNodeFunctionSet(hdwf, channel1, AnalogOutNodeCarrier, funcCustom) 
+                dwf.FDwfAnalogOutNodeDataSet(hdwf, channel1, AnalogOutNodeCarrier, rgdSamples3, c_int(cSamples))
+                dwf.FDwfAnalogOutNodeFrequencySet(hdwf, channel1, AnalogOutNodeCarrier, c_double(hzFreq2)) 
+                dwf.FDwfAnalogOutNodeAmplitudeSet(hdwf, channel1, AnalogOutNodeCarrier, c_double(Gz[Nproj])) 
+            
+                dwf.FDwfAnalogOutRunSet(hdwf, channel1, c_double(1.0/hzFreq2)) # run for 2 periods
+                dwf.FDwfAnalogOutWaitSet(hdwf, channel1, c_double(predelay + Tp)) # wait one pulse time
+                dwf.FDwfAnalogOutRepeatSet(hdwf, channel1, c_int(1)) # repeat 3 times
+                dwf.FDwfAnalogOutTriggerSourceSet(hdwf, channel1, trigsrcExternal1)  # sets the trigger source
+            
     
-    def insert_trapezoid(waveform, trapezoid, start_index):
-        """Insert trapezoid into waveform at a specified start index."""
-        n = len(trapezoid)
-        end_index = start_index + n
-        
-        # Make sure indices are within waveform bounds
-        if end_index > len(waveform):
-            trapezoid = trapezoid[:len(waveform)-start_index]
-            end_index = len(waveform)
-        
-        waveform[start_index:end_index] += trapezoid
-        return waveform
-    
-    # === CREATE TRAPEZOIDS ===
-    trapezoid1 = create_trapezoid(ramp_time1, hold_time1, max_voltage, deltaT)
-    trapezoid2 = create_trapezoid(ramp_time2, hold_time2, max_voltage, deltaT)
-    
-    # Insert trapezoids
-    rgdSamples2_np = insert_trapezoid(rgdSamples2_np, trapezoid1, start_index=0)
-    
-    # Compute start index for trapezoid2 based on midpoint
-    center_index2 = int(midpoint_time2 / deltaT)
-    start_index2 = center_index2 - len(trapezoid2)//2
-    rgdSamples2_np = insert_trapezoid(rgdSamples2_np, trapezoid2, start_index2)
-    
-    # === CONVERT TO CTYPE ARRAY FOR HARDWARE ===
-    rgdSamples2 = (c_double * cSamples)()
-    for i in range(cSamples):
-        rgdSamples2[i] = rgdSamples2_np[i]
-    
-    # === PLOT ===
-    plt.figure(figsize=(10,4))
-    plt.plot(time_array, rgdSamples2_np)
-    plt.xlabel('Time [s]')
-    plt.ylabel('Voltage')
-    plt.grid(True)
-    plt.show()
-    
-    
-    if useSecondAD2:
-    
-        #######################################################################
-        # Point to seconds AD2
-        y1 = set_ad2_device(1)
-        #######################################################################
-        
-        if GR_On:
-    
-            print("Generating custom waveform...")
-            dwf.FDwfAnalogOutNodeEnableSet(hdwf, channel, AnalogOutNodeCarrier, c_int(1))
-            dwf.FDwfAnalogOutNodeFunctionSet(hdwf, channel, AnalogOutNodeCarrier, funcCustom) 
-            dwf.FDwfAnalogOutNodeDataSet(hdwf, channel, AnalogOutNodeCarrier, rgdSamples2, c_int(cSamples))
-            dwf.FDwfAnalogOutNodeFrequencySet(hdwf, channel, AnalogOutNodeCarrier, c_double(hzFreq2)) 
-            dwf.FDwfAnalogOutNodeAmplitudeSet(hdwf, channel, AnalogOutNodeCarrier, c_double(V_grad_ad2)) 
-        
-            dwf.FDwfAnalogOutRunSet(hdwf, channel, c_double(1.0/hzFreq2)) # run for 2 periods
-            dwf.FDwfAnalogOutWaitSet(hdwf, channel, c_double(predelay + Tp)) # wait one pulse time
-            dwf.FDwfAnalogOutRepeatSet(hdwf, channel, c_int(1)) # repeat 3 times
-            dwf.FDwfAnalogOutTriggerSourceSet(hdwf, channel, trigsrcExternal1)  # sets the trigger source
+            #######################################################################
+            y2 = set_pos_powersupply(5)
+            y2 = arm_analog()
+            y1 = set_ad2_device(0)      # Point back at device 1
+            #######################################################################
         
         
         ########################################################################
-        # Shim Control
+        # Control lines
         ########################################################################
         
-        if shim_On:
-                  
-            shim1_ChNum = 1
-            shim1_V = 0.1
-
-            check_shim_voltage(shim1_V)
-            
-            # Turn on first shim
-            print("GSetting shim voltage 1...")
-            set_shim(ChNum, offset)
-            
-            # Turn on second shim
-            print("GSetting shim voltage 1...")
-            set_shim(ChNum, offset)
-
-        #######################################################################
+        
+        # ======= T/R control line =======
+        y = set_dio(2,totalCycles,predelay - 0.5 * Tp, predelay + 3 * Tp)
+        
+        
+        # ======= Attenuator control line =======
+        y = set_dio(3,totalCycles,predelay - 0.5 * Tp, 2 * Tp)
+        
+        ########################################################################
+    
+        ########################################################################
+        # Wavegens
+        ########################################################################
+        
+        
+        # turn on positive voltage power supply
         y2 = set_pos_powersupply(5)
-        y2 = arm_analog()
-        y1 = set_ad2_device(0)      # Point back at device 1
-        #######################################################################
-    
-    
-    ########################################################################
-    # Control lines
-    ########################################################################
-    
-    
-    # ======= T/R control line =======
-    y = set_dio(2,totalCycles,predelay - 0.5 * Tp, predelay + 3 * Tp)
-    
-    
-    # ======= Attenuator control line =======
-    y = set_dio(3,totalCycles,predelay - 0.5 * Tp, 2 * Tp)
-    
-    ########################################################################
-
-    ########################################################################
-    # Wavegens
-    ########################################################################
-    
-    
-    # turn on positive voltage power supply
-    y2 = set_pos_powersupply(5)
-    
-    # Set up the RF pulse generator
-    y1 = set_wavegen(0,frequency,amplitude,Tp,predelay,Npulse) # single pair of RF pulse
-    
-    
-    # Set up the LO waveform
-    y1 = set_wavegen(1,frequency_LO, amplitude_LO, Tp_LO, predelay_LO, Npulse_LO) 
-    
-    # set up acquisition (scope) (Lab 2)
-    delay = 0.0
-    y1 = set_scope(sampFreq,numSamp,Tacq,delay) 
-    
-    # Arm the analog and digital sections 
-    y1 = arm_dio(SeqTime)
-    y1 = arm_analog()      
-    time.sleep(1)
-    
-    #  trigger and collect data
-    print('going to trigger')
-    y1 = trigger_and_read_ch0(rgdSamples,numSamp)      
-    print('back from trigger')  
-    
-    ## define time array for plot
-    Tacqms = Tacq * 1000.
-    time2 = np.linspace(0, Tacqms, numSamp) # linspace(start_time, total time, number of points)
         
-    # ========== Plot acquired data ================
-    plt.plot(time2, rgdSamples)
-    plt.xlabel('Time msec')
-    plt.ylabel('Measured Voltage (V)')
-    plt.title('Signal')
-    fig1 = plt.show()
-    
-    
-    # Sum the signal for averaging
-    signals_total = [float(rgdSamples[j]) + signals_total[j] for j in range(len(signals_total))]
+        # Set up the RF pulse generator
+        y1 = set_wavegen(0,frequency,amplitude,Tp,predelay,Npulse) # single pair of RF pulse
         
-    y1 = reset_and_close()
-    time.sleep(TR1)
+        
+        # Set up the LO waveform
+        y1 = set_wavegen(1,frequency_LO, amplitude_LO, Tp_LO, predelay_LO, Npulse_LO) 
+        
+        # set up acquisition (scope) (Lab 2)
+        delay = 0.0
+        y1 = set_scope(sampFreq,numSamp,Tacq,delay) 
+        
+        # Arm the analog and digital sections 
+        y1 = arm_dio(SeqTime)
+        y1 = arm_analog()      
+        time.sleep(1)
+        
+        #  trigger and collect data
+        print('going to trigger')
+        y1 = trigger_and_read_ch0(rgdSamples,numSamp)      
+        print('back from trigger')  
+        
+        ## define time array for plot
+        Tacqms = Tacq * 1000.
+        time2 = np.linspace(0, Tacqms, numSamp) # linspace(start_time, total time, number of points)    
+        
+        
+        if plot_individual_signals:
+            # ========== Plot acquired data ================
+            plt.plot(time2, rgdSamples)
+            plt.xlabel('Time msec')
+            plt.ylabel('Measured Voltage (V)')
+            plt.title('Signal')
+            fig1 = plt.show()
+        
+        
+        # Sum the signal for averaging
+        signals_total = [float(rgdSamples[j]) + signals_total[j] for j in range(len(signals_total))]
+            
+        y1 = reset_and_close()
+        time.sleep(TR1)
+        
+    # Take average of signal
+    signals_avg = [val / numAvgs for val in signals_total]
     
-# Take average of signal
-signals_avg = [val / numAvgs for val in signals_total]
-
-########################################################################
-# Plot Averaged Signal
-########################################################################
-plt.plot(time2, signals_avg)
-plt.xlabel('Time (ms)')
-plt.ylabel('Measured Voltage')
-plt.title(f'Averaged Signal with {numAvgs} Averages')
-fig3 = plt.show()
-
-########################################################################
-# Plot Filtered Averaged Signal
-########################################################################
+    ########################################################################
+    # Plot Averaged Signal
+    ########################################################################
+    if plot_averaged_signal:
+        plt.plot(time2, signals_avg)
+        plt.xlabel('Time (ms)')
+        plt.ylabel('Measured Voltage')
+        plt.title(f'Averaged Signal with {numAvgs} Averages')
+        fig3 = plt.show()
     
-## Butterworth bandpass filter
-sos = signal.butter(butterworth_N, butterworth_Wn, 'bandpass', fs=sampFreq, output='sos')
-filtered = signal.sosfilt(sos, rgdSamples)
-
-plt.plot(time2, filtered)
-plt.xlabel('Time msec')
-plt.ylabel('Measured Voltage (V)')
-plt.title('Filtered Averaged Signal with {numAvgs} Averages')
-fig2 = plt.show()
-
-########################################################################
-# Plot FFT of Averaged Signal
-########################################################################
-npts = numSamp
-deltat = 1e-6  # 1 microsecond = 1 MSps sampling rate
-
-# FFT calculation
-y_transform = fftshift(fft(fftshift(signals_avg)))
-
-# Frequency axis
-deltaf = 1 / (npts * deltat)
-fmax = deltaf * npts / 2
-fmin = -fmax + deltaf
-freq = np.linspace(fmin, fmax, npts)
-
-# Center frequency and bandwidth
-center_freq = 1e5  # 100 kHz
-bandwidth = 4e4    # 20 kHz
-lower_bound = center_freq - bandwidth / 2
-upper_bound = center_freq + bandwidth / 2
-
-# Find indices within desired frequency range
-mask = (freq >= lower_bound) & (freq <= upper_bound)
-
-# Plot only the desired band
-plt.plot(freq[mask], abs(y_transform[mask]))
-plt.xlabel('Frequency (Hz)')
-plt.ylabel('FFT Magnitude')
-plt.title(f'FFT around {center_freq/1e3:.0f} kHz (±{bandwidth/2/1e3:.0f} kHz) - RF Freq {frequency}')
-plt.grid(True)
-plt.show()
-
-########################################################################
-# Calculate Linewidth of FFT
-########################################################################
-
-spectrum = abs(y_transform[mask])
-spectrum_freq = freq[mask]
-
-linewidth, peak_freq = calculate_linewidth(spectrum_freq, spectrum)
-print(f"Peak at {peak_freq:.2f} Hz, Linewidth = {linewidth:.2f} Hz")
-
-plt.plot(spectrum_freq, spectrum)
-plt.axvline(peak_freq, color='r', linestyle='--', label='Peak')
-plt.axvline(peak_freq - linewidth/2, color='g', linestyle='--', label='FWHM')
-plt.axvline(peak_freq + linewidth/2, color='g', linestyle='--')
-plt.legend()
-plt.xlabel('Frequency (Hz)')
-plt.ylabel('FFT Magnitude')
-plt.title(f'FFT around {center_freq/1e3:.0f} kHz (±{bandwidth/2/1e3:.0f} kHz) - RF Freq {frequency}')
-plt.grid(True)
-plt.show()
-
-########################################################################
-# Save Averaged Signal to File
-########################################################################
-       
-# Write data to file
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-filename = f"mri_echo_{timestamp}.npz"
-
-# ========= Save data to npz file ================
-np.savez(
-    filename,
-    averaged_signal=signals_avg,
-    avgs = numAvgs,
-    rf_freq=frequency,
-    timestamp=timestamp
-)
-
+    ########################################################################
+    # Plot Filtered Averaged Signal
+    ########################################################################
+    if plot_filtered_average_signal: 
+        ## Butterworth bandpass filter
+        sos = signal.butter(butterworth_N, butterworth_Wn, 'bandpass', fs=sampFreq, output='sos')
+        filtered = signal.sosfilt(sos, rgdSamples)
+        
+        plt.plot(time2, filtered)
+        plt.xlabel('Time msec')
+        plt.ylabel('Measured Voltage (V)')
+        plt.title('Filtered Averaged Signal with {numAvgs} Averages')
+        fig2 = plt.show()
+    
+    ########################################################################
+    # Plot FFT of Averaged Signal
+    ########################################################################
+    npts = numSamp
+    deltat = 1e-6  # 1 microsecond = 1 MSps sampling rate
+    
+    # FFT calculation
+    y_transform = fftshift(fft(fftshift(signals_avg)))
+    
+    # Frequency axis
+    deltaf = 1 / (npts * deltat)
+    fmax = deltaf * npts / 2
+    fmin = -fmax + deltaf
+    freq = np.linspace(fmin, fmax, npts)
+    
+    # Center frequency and bandwidth
+    center_freq = 1e5  # 100 kHz
+    bandwidth = 4e4    # 20 kHz
+    lower_bound = center_freq - bandwidth / 2
+    upper_bound = center_freq + bandwidth / 2
+    
+    # Find indices within desired frequency range
+    mask = (freq >= lower_bound) & (freq <= upper_bound)
+    
+    if plot_fft:
+        # Plot only the desired band
+        plt.plot(freq[mask], abs(y_transform[mask]))
+        plt.xlabel('Frequency (Hz)')
+        plt.ylabel('FFT Magnitude')
+        plt.title(f'FFT around {center_freq/1e3:.0f} kHz (±{bandwidth/2/1e3:.0f} kHz) - RF Freq {frequency}')
+        plt.grid(True)
+        plt.show()
+    
+    ########################################################################
+    # Calculate Linewidth of FFT
+    ########################################################################
+    
+    spectrum = abs(y_transform[mask])
+    spectrum_freq = freq[mask]
+    
+    linewidth, peak_freq = calculate_linewidth(spectrum_freq, spectrum)
+    print(f"Peak at {peak_freq:.2f} Hz, Linewidth = {linewidth:.2f} Hz")
+    
+    if plot_fft_linewidth:
+        plt.plot(spectrum_freq, spectrum)
+        plt.axvline(peak_freq, color='r', linestyle='--', label='Peak')
+        plt.axvline(peak_freq - linewidth/2, color='g', linestyle='--', label='FWHM')
+        plt.axvline(peak_freq + linewidth/2, color='g', linestyle='--')
+        plt.legend()
+        plt.xlabel('Frequency (Hz)')
+        plt.ylabel('FFT Magnitude')
+        plt.title(f'FFT around {center_freq/1e3:.0f} kHz (±{bandwidth/2/1e3:.0f} kHz) - RF Freq {frequency}')
+        plt.grid(True)
+        plt.show()
+    
+    ########################################################################
+    # Save Averaged Signal to File
+    ########################################################################
+           
+    # Write data to file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"Lab 9 Proj/mri_echo_{timestamp}.npz"
+    
+    if save_data:
+        # ========= Save data to npz file ================
+        np.savez(
+            filename,
+            averaged_signal=signals_avg,
+            avgs = numAvgs,
+            rf_freq=frequency,
+            timestamp=timestamp
+        )
+        
+        
+        save_parameters_to_file(
+            useSecondAD2,
+            GR_On,
+            shim_On,
+            numAvgs,
+            frequency,
+            amplitude,
+            TE,
+            Tp,
+            Npulse,
+            TR1,
+            sampFreq,
+            Tacq,
+            IF_freq,
+            amplitude_LO,
+            Npts,
+            FOV,
+            ramp_time,
+            calibration_factor
+        )

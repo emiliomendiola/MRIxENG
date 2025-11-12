@@ -8,7 +8,7 @@ Created on Sun Nov  2 21:26:33 2025
 
 import numpy as np
 
-def snr_from_fft(fft_data, peak_width=3):
+def snr_from_fft(fft_data, peak_width=5):
     """
     Calculate the Signal-to-Noise Ratio (SNR) from an FFT spectrum.
     

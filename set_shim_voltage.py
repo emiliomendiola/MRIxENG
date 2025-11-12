@@ -14,4 +14,4 @@ def check_shim_voltage(shim_V):
                          f"shim_V={shim_V:.3f} V. "
                          "Voltages must stay within ±0.1 V.")
     else:
-        print(f"Shim voltages OK: shim_V={shim1_V:.3f} V")
+        print(f"Shim voltages OK: shim_V={shim_V:.3f} V")
